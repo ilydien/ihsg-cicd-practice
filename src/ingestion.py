@@ -66,7 +66,7 @@ def fetch_prices(
                 progress=False,
                 auto_adjust=False,
                 group_by="ticker",
-                threads=True,
+                threads=False,
             )
             break
         except Exception as error:  # noqa: BLE001 - dicoba ulang lalu dilempar

@@ -1,0 +1,118 @@
+name: IHSG Data Ingestion CD
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Setiap 6 jam UTC: 00:00, 06:00, 12:00, 18:00
+    # WIB (UTC+7): 07:00, 13:00, 19:00, 01:00
+    - cron: "0 */6 * * *"
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: ihsg-ingestion
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.12"
+  AZURE_STORAGE_ACCOUNT: ${{ vars.AZURE_STORAGE_ACCOUNT }}
+  AZURE_STORAGE_CONTAINER: ${{ vars.AZURE_STORAGE_CONTAINER }}
+
+jobs:
+  ingest:
+    name: Scrape and Upload
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run ingestion pipeline
+        run: python -m src.main
+
+      - name: Show result summary
+        run: cat data/summary.json
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Upload dataset to Azure Blob Storage
+        run: |
+          set -euo pipefail
+
+          : "${AZURE_STORAGE_ACCOUNT:?AZURE_STORAGE_ACCOUNT belum diset}"
+          : "${AZURE_STORAGE_CONTAINER:?AZURE_STORAGE_CONTAINER belum diset}"
+
+          az storage blob upload \
+            --account-name "$AZURE_STORAGE_ACCOUNT" \
+            --container-name "$AZURE_STORAGE_CONTAINER" \
+            --name ihsg/latest.csv \
+            --file data/ihsg.csv \
+            --auth-mode login \
+            --overwrite \
+            --only-show-errors
+
+          az storage blob upload \
+            --account-name "$AZURE_STORAGE_ACCOUNT" \
+            --container-name "$AZURE_STORAGE_CONTAINER" \
+            --name ihsg/summary.json \
+            --file data/summary.json \
+            --auth-mode login \
+            --overwrite \
+            --only-show-errors
+
+      - name: Verify uploaded blobs
+        run: |
+          set -euo pipefail
+
+          az storage blob list \
+            --account-name "$AZURE_STORAGE_ACCOUNT" \
+            --container-name "$AZURE_STORAGE_CONTAINER" \
+            --prefix ihsg/ \
+            --auth-mode login \
+            --query "[].{name:name, size:properties.contentLength}" \
+            -o table
+
+      - name: Write GitHub Actions summary
+        if: always()
+        run: |
+          {
+            echo "## IHSG Data Ingestion"
+            echo ""
+            echo "| Item | Nilai |"
+            echo "| --- | --- |"
+            echo "| Storage account | $AZURE_STORAGE_ACCOUNT |"
+            echo "| Container | $AZURE_STORAGE_CONTAINER |"
+            echo "| Blob prefix | ihsg/ |"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -f data/summary.json ]; then
+            {
+              echo "### Ringkasan pipeline"
+              echo ""
+              echo '```json'
+              cat data/summary.json
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
